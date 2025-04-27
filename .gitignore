@@ -1,0 +1,5 @@
+*.db
+other
+.venv
+
+questions
