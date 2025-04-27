@@ -169,6 +169,7 @@ class QuestionWindow(QWidget):
             self.timer.start(100)
         else:
             print("No serial port found, skipping polling")
+            self.timer = None
         
     def reset_team_buttons(self):
         for button, _ in self.team_buttons:
@@ -193,31 +194,13 @@ class QuestionWindow(QWidget):
                 team.setStyleSheet("background-color: green; color: white; font-size: 20px; font-weight: bold;")
             else:
                 print("Invalid team index", index)
-        # # if True:
-        #     # ser.writelines([b"1"])
-        #     # ser.write(b"1")
-        #     ser.write(b"1\n")
-        #     ser.flush()
-        #     data = ser.readline().decode("utf-8").strip()
-        #     print("Received data:", data)
-        #     # team many 0/1s
-        #     if "1" in data:
-        #         # get index of first 1
-        #         index = data.index("1")
-        #         if index < len(self.team_buttons):
-        #             print("Team", index, "buzzed in")
-        #             self.input = index
-        #             team, _ = self.team_buttons[index]
-        #             # team.setDisabled(True)
-        #             team.setStyleSheet("background-color: green; color: white; font-size: 20px; font-weight: bold;")
-        #         else:
-        #             print("Invalid team index", index)
         
         
     def on_close(self):
         print("Closing question window for", self.category, self.score)
         set_normal_button(self.category, self.score)
-        self.timer.stop()
+        if self.timer is not None:
+            self.timer.stop()
         self.close()
         assert mainWindow is not None
         mainWindow.open_question = None
@@ -230,7 +213,8 @@ class QuestionWindow(QWidget):
             point_dict[category] = {}
         if score in point_dict[category]:
             print(f"Score {score} already awarded for category {category}")
-        self.timer.stop()
+        if self.timer is not None:
+            self.timer.stop()
         point_dict[category][score] = (team, full_points)
         disable_button(category, score)
         recompute_scores()
@@ -287,6 +271,24 @@ def set_normal_button(category, score):
         return
     button.setDisabled(False)
     button.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
+    button.setText(str(score))
+    
+    
+def undo_point(category, score):
+    if category not in point_dict:
+        print(f"Category {category} not found")
+        return
+    if score not in point_dict[category]:
+        print(f"Score {score} not found in category {category}")
+        return
+    team, full_points = point_dict[category][score]
+    if team not in teams:
+        print(f"Invalid team {team} in for category {category} and score {score}")
+        return
+    del point_dict[category][score]
+    set_normal_button(category, score)
+    recompute_scores()
+    point_dict.sync()
     
 
 class MainWindow(QMainWindow):
@@ -320,10 +322,22 @@ class MainWindow(QMainWindow):
                 set_normal_button(category, score)
                 if category in point_dict and score in point_dict[category]:
                     disable_button(category, score)
+                    button.setMinimumWidth(150)
+                    button2 = QPushButton("X")
+                    button2.setStyleSheet("background-color: darkgray; color: white; font-size: 20px; font-weight: bold;")
+                    button2.setMinimumHeight(100)
+                    button2.setMinimumWidth(50)
+                    button2.setMaximumWidth(50)
+                    button2.clicked.connect(lambda _, c=category, s=score: undo_point(c, s))
+                    hgroup = QHBoxLayout()
+                    hgroup.addWidget(button)
+                    hgroup.addWidget(button2)
+                    hgroup.setSpacing(0)
+                    vbox.addLayout(hgroup)
                 else:
                     button.clicked.connect(lambda _, c=category, s=score: select_point(c, s))
+                    vbox.addWidget(button)
                     
-                vbox.addWidget(button)
             hbox.addLayout(vbox)
             
         vtbox.addLayout(hbox)
