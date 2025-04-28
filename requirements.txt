@@ -1,3 +1,2 @@
 pyserial
 pyside6
-shelve

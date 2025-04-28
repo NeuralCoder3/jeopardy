@@ -48,6 +48,7 @@ for i in range(4):
     }
     
 point_dict = shelve.open("points.db", writeback=True)
+additional_points = shelve.open("additional_points.db", writeback=True)
 
 categories = sorted(os.listdir(question_dir))
 question_file = {} # category -> points -> filename
@@ -69,11 +70,18 @@ def recompute_scores():
         scores[team] = 0
     for category, data in point_dict.items():
         for score, teamdata in data.items():
-            team, full_points = teamdata
+            for team, score in teamdata:
+                if team not in scores:
+                    print(f"Invalid team {team} in for category {category} and score {score}")
+                    continue
+                scores[team] += score
+                
+    for team, deltas in additional_points.items():
+        for delta in deltas:
             if team not in scores:
-                print(f"Invalid team {team} in for category {category} and score {score}")
+                print(f"Invalid team {team} in additional points")
                 continue
-            scores[team] += score if full_points else score // 2
+            scores[team] += delta
             
     for team, score in scores.items():
         if team not in score_buttons:
@@ -124,19 +132,31 @@ class QuestionWindow(QWidget):
             button.setMinimumWidth(200)
             button.clicked.connect(lambda _, t=team, c=category, s=score: self.award_points(t, c, s))
             
-            button2 = QPushButton(f"No Question")
-            button2.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
-            button2.setMinimumHeight(25)
-            button2.setMinimumWidth(200)
-            button2.clicked.connect(lambda _, t=team, c=category, s=score: self.award_points(t, c, s, False))
+            no_answer_btn = QPushButton(f"No Question")
+            no_answer_btn.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
+            no_answer_btn.setMinimumHeight(25)
+            no_answer_btn.setMinimumWidth(175)
+            no_answer_btn.clicked.connect(lambda _, t=team, c=category, s=score: self.award_points(t, c, s, False))
+            
+            wrong_btn = QPushButton(f"X")
+            wrong_btn.setStyleSheet("background-color: red; color: yellow; font-size: 20px; font-weight: bold;")
+            wrong_btn.setMinimumHeight(25)
+            wrong_btn.setMinimumWidth(25)
+            wrong_btn.setMaximumWidth(25)
+            wrong_btn.clicked.connect(lambda _, t=team, c=category, s=score: self.wrong_answer(t,c,s))
+            
+            extra_btn = QHBoxLayout()
+            extra_btn.addWidget(no_answer_btn)
+            extra_btn.addWidget(wrong_btn)
+            extra_btn.setSpacing(0)
             
             button_layout = QVBoxLayout()
             button_layout.addWidget(button)
-            button_layout.addWidget(button2)
+            button_layout.addLayout(extra_btn)
             button_layout.setSpacing(0)
             
             award_layout.addLayout(button_layout)
-            self.team_buttons.append((button, button2))
+            self.team_buttons.append((button, (no_answer_btn,wrong_btn)))
             
         additional_layout = QVBoxLayout()
         close_button = QPushButton("Close")
@@ -212,17 +232,35 @@ class QuestionWindow(QWidget):
         assert mainWindow is not None
         mainWindow.open_question = None
         
+    def wrong_answer(self, team, category, score):
+        print("Wrong answer for team", team)
+        if team not in teams:
+            print(f"Invalid team {team} in for category {category} and score {score}")
+            return
+        self.reset_team_buttons()
+        # score = self.score
+        if category not in point_dict:
+            point_dict[category] = {}
+        if score not in point_dict[category]:
+            point_dict[category][score] = []
+        point_dict[category][score].append((team, -score))
+        recompute_scores()
+        point_dict.sync()
+        
+        
     def award_points(self, team, category, score, full_points=True):
         if team not in teams:
             print(f"Invalid team {team} in for category {category} and score {score}")
             return
         if category not in point_dict:
             point_dict[category] = {}
-        if score in point_dict[category]:
-            print(f"Score {score} already awarded for category {category}")
+        if score not in point_dict[category]:
+            point_dict[category][score] = []
+        # else:
+        #     print(f"Score {score} already awarded for category {category}")
         if self.timer is not None:
             self.timer.stop()
-        point_dict[category][score] = (team, full_points)
+        point_dict[category][score].append((team, score if full_points else score // 2))
         disable_button(category, score)
         recompute_scores()
         point_dict.sync()
@@ -254,14 +292,70 @@ def disable_button(category, score):
         return
     button = point_buttons[category][score]
     button.setDisabled(True)
-    button.setStyleSheet("background-color: gray; color: white; font-size: 20px; font-weight: bold;")
     
-    team,full_points = point_dict[category][score]
-    if team not in teams:
-        print(f"Invalid team {team} in for category {category} and score {score}")
-        return
-    awarded_score = score if full_points else score // 2
-    button.setText(teams[team]["name"]+f" (+{awarded_score})")
+    team_scores = {}
+    # for team, _ in teams.items():
+    #     team_scores[team] = 0
+    winner = None
+    losers = []
+    for team, score in point_dict[category][score]:
+        if team not in team_scores:
+            team_scores[team] = 0
+        team_scores[team] += score
+        if score > 0:
+            winner = (team, score)
+        elif score < 0:
+            losers.append(team)
+    button.setStyleSheet("background-color: gray; color: white; font-size: 15px; font-weight: bold;")
+    button.setIconSize(QSize(0, 0))
+    # losers = [teams[team]["name"] for team in sorted(team_scores.keys()) if team_scores[team] < 0]
+    loser_txt = "\n"
+    for i, team in enumerate(sorted(losers)):
+        if i > 0:
+            loser_txt += ", " 
+        if i > 0 and i%2 == 0:
+            loser_txt += "\n"
+        loser_txt += teams[team]["name"]
+            
+    button.setText(
+        ((teams[winner[0]]["name"] + " (+" + str(winner[1]) + ")\n") if winner else "")+
+        loser_txt
+    )
+    # txt =  (
+    #     ((teams[winner[0]]["name"] + " (+" + str(winner[1]) + ")") if winner else "")+
+    #     # +", ".join([str(team_scores[team]) for team in sorted(team_scores.keys())])
+    #     ", ".join([teams[team]["name"] for team in sorted(team_scores.keys()) if team_scores[team] < 0])
+    # )
+    # lbl = QLabel(txt,button)
+    # lbl.setWordWrap(True)
+    # lbl.setStyleSheet("color: white; font-size: 15px; font-weight: bold;")
+    # # lbl.setMinimumWidth(button.width())
+    # # lbl.setMaximumWidth(button.width())
+    # # lbl.setMinimumHeight(button.height())
+    # # lbl.setMaximumHeight(button.height())
+    # lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    
+    # allow word wrap
+    # button.setWordWrap(True)
+        
+    # winners = len([team for team in team_scores if team_scores[team] > 0])
+    # if winners == 0:
+    #     button.setText("---")
+    # elif winners == 1:
+    #     team = [team for team in team_scores if team_scores[team] > 0][0]
+    #     button.setText(teams[team]["name"]+f" (+{team_scores[team]})")
+    # else:
+    #     print("Multiple winners for category", category, "and score", score)
+        
+    # score_text = ", ".join([str(score) for _, score in sorted(team_scores.items(), key=lambda x: x[0])])
+    # button.setText(score_text)
+    
+    # team,full_points = point_dict[category][score]
+    # if team not in teams:
+    #     print(f"Invalid team {team} in for category {category} and score {score}")
+    #     return
+    # awarded_score = score if full_points else score // 2
+    # button.setText(teams[team]["name"]+f" (+{awarded_score})")
     
 def set_active_button(category, score):
     if category not in point_buttons or score not in point_buttons[category]:
@@ -288,10 +382,16 @@ def undo_point(category, score):
     if score not in point_dict[category]:
         print(f"Score {score} not found in category {category}")
         return
-    team, full_points = point_dict[category][score]
-    if team not in teams:
-        print(f"Invalid team {team} in for category {category} and score {score}")
-        return
+    # team, full_points = point_dict[category][score]
+    # if team not in teams:
+    #     print(f"Invalid team {team} in for category {category} and score {score}")
+    #     return
+    
+    # only positive points
+    # for team, awarded_score in point_dict[category][score]:
+    #     if awarded_score < 0 and 0 in point_dict[category]:
+    #         # move negative to 0 question
+    #         point_dict[category][0].append((team, -awarded_score))
     del point_dict[category][score]
     set_normal_button(category, score)
     recompute_scores()
@@ -345,8 +445,8 @@ class MainWindow(QMainWindow):
                     hgroup.setSpacing(0)
                     vbox.addLayout(hgroup)
                 else:
-                    button.clicked.connect(lambda _, c=category, s=score: select_point(c, s))
                     vbox.addWidget(button)
+                button.clicked.connect(lambda _, c=category, s=score: select_point(c, s))
                     
             hbox.addLayout(vbox)
             
@@ -371,6 +471,9 @@ class MainWindow(QMainWindow):
             button.setIcon(icon)
             button.setMinimumHeight(100)
             button.setMinimumWidth(200)
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(lambda pos, team=team: self.adjust(team,-100))
+            button.clicked.connect(lambda _, team=team: self.adjust(team, 100))
             score_buttons[team] = button
             vbox.addWidget(button)
             pointbox.addLayout(vbox)
@@ -385,6 +488,19 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(root)
         self.show()
+        
+    def adjust(self, team, delta):
+        if team not in teams:
+            print(f"Invalid team {team}")
+            return
+        if team not in score_buttons:
+            print(f"Invalid team {team} in score buttons")
+            return
+        if team not in additional_points:
+            additional_points[team] = []
+        additional_points[team].append(delta)
+        additional_points.sync()
+        recompute_scores()
 
 
 app = QApplication(sys.argv)
