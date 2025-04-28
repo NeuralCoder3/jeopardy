@@ -1,0 +1,1 @@
+NO_SERIAL_PORTS=1 python jeopardy.py

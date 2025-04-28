@@ -8,24 +8,31 @@ import serial
 from serial.tools import list_ports
 
 ports = list_ports.comports()
-if len(ports) == 0:
+if len(ports) == 0 or os.environ.get("NO_SERIAL_PORTS", "0") == "1":
+    # no ports or diabled by ENV
     print("No serial ports found!")
     # exit(1)
     ser = None
 else:
+    port = None
     if len(ports) > 1:
         for i, port in enumerate(ports):
             print(f"{i}: {port.device} - {port.description}")
-        port = ports[int(input("Select port (0-{}): ".format(len(ports)-1)))]
+        choice = int(input("Select port (0-{}): ".format(len(ports)-1)))
+        if choice < 0 or choice >= len(ports):
+            port = ports[choice]
     else:
         port = ports[0]
-    ser = serial.Serial(
-        port=port.device,
-        baudrate=9600,
-        parity=serial.PARITY_ODD,
-        stopbits=serial.STOPBITS_TWO,
-        bytesize=serial.SEVENBITS
-    )
+    if port is None:
+        ser = None
+    else:
+        ser = serial.Serial(
+            port=port.device,
+            baudrate=9600,
+            parity=serial.PARITY_ODD,
+            stopbits=serial.STOPBITS_TWO,
+            bytesize=serial.SEVENBITS
+        )
         
 
 question_dir = os.path.join(".", "questions")
@@ -242,10 +249,10 @@ def select_point(category, score):
     mainWindow.open_question[0].show()
     
 def disable_button(category, score):
-    button = point_buttons[category][score]
-    if button is None:
+    if category not in point_buttons or score not in point_buttons[category]:
         print(f"Button for {category} {score} not found")
         return
+    button = point_buttons[category][score]
     button.setDisabled(True)
     button.setStyleSheet("background-color: gray; color: white; font-size: 20px; font-weight: bold;")
     
@@ -257,18 +264,18 @@ def disable_button(category, score):
     button.setText(teams[team]["name"]+f" (+{awarded_score})")
     
 def set_active_button(category, score):
-    button = point_buttons[category][score]
-    if button is None:
+    if category not in point_buttons or score not in point_buttons[category]:
         print(f"Button for {category} {score} not found")
         return
+    button = point_buttons[category][score]
     button.setDisabled(False)
     button.setStyleSheet("background-color: blue; color: yellow; font-size: 20px; font-weight: bold;")
     
 def set_normal_button(category, score):
-    button = point_buttons[category][score]
-    if button is None:
+    if category not in point_buttons or score not in point_buttons[category]:
         print(f"Button for {category} {score} not found")
         return
+    button = point_buttons[category][score]
     button.setDisabled(False)
     button.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
     button.setText(str(score))
@@ -310,9 +317,12 @@ class MainWindow(QMainWindow):
             lbl = QLabel(category)
             lbl.setStyleSheet("font-size: 20px; font-weight: bold; color: white; background-color: darkblue;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.mouseDoubleClickEvent = lambda event, c=category: select_point(c, 0)
             vbox.addWidget(lbl)
             point_buttons[category] = {}
             for score in sorted(question_file[category].keys()):
+                if score == 0:
+                    continue
                 button = QPushButton(str(score))
                 button.setIconSize(QSize(50, 50))
                 button.setIcon(icon)
