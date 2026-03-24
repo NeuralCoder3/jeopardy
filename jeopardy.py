@@ -4,35 +4,41 @@ from PySide6.QtCore import *
 from PySide6.QtGui import *
 import sys
 import os
-import serial
-from serial.tools import list_ports
 
-ports = list_ports.comports()
-if len(ports) == 0 or os.environ.get("NO_SERIAL_PORTS", "0") == "1":
-    # no ports or diabled by ENV
-    print("No serial ports found!")
-    # exit(1)
-    ser = None
-else:
-    port = None
-    if len(ports) > 1:
-        for i, port in enumerate(ports):
-            print(f"{i}: {port.device} - {port.description}")
-        choice = int(input("Select port (0-{}): ".format(len(ports)-1)))
-        if choice < 0 or choice >= len(ports):
-            port = ports[choice]
-    else:
-        port = ports[0]
-    if port is None:
+serialEnable = False
+
+if serialEnable:
+    import serial
+    from serial.tools import list_ports
+
+    ports = list_ports.comports()
+    if len(ports) == 0 or os.environ.get("NO_SERIAL_PORTS", "0") == "1":
+        # no ports or diabled by ENV
+        print("No serial ports found!")
+        # exit(1)
         ser = None
     else:
-        ser = serial.Serial(
-            port=port.device,
-            baudrate=9600,
-            parity=serial.PARITY_ODD,
-            stopbits=serial.STOPBITS_TWO,
-            bytesize=serial.SEVENBITS
-        )
+        port = None
+        if len(ports) > 1:
+            for i, port in enumerate(ports):
+                print(f"{i}: {port.device} - {port.description}")
+            choice = int(input("Select port (0-{}): ".format(len(ports)-1)))
+            if choice < 0 or choice >= len(ports):
+                port = ports[choice]
+        else:
+            port = ports[0]
+        if port is None:
+            ser = None
+        else:
+            ser = serial.Serial(
+                port=port.device,
+                baudrate=9600,
+                parity=serial.PARITY_ODD,
+                stopbits=serial.STOPBITS_TWO,
+                bytesize=serial.SEVENBITS
+            )
+else:
+    ser = None
         
 
 question_dir = os.path.join(".", "questions")
@@ -171,8 +177,16 @@ class QuestionWindow(QWidget):
         reset_button.setMinimumHeight(60)
         reset_button.setMinimumWidth(200)
         
+        
+        nobody_button = QPushButton("Nobody")
+        nobody_button.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
+        nobody_button.clicked.connect(lambda _, c=category, s=score: self.nobody_points(c, s))
+        nobody_button.setMinimumHeight(60)
+        nobody_button.setMinimumWidth(200)
+        
         additional_layout.addWidget(close_button)
         additional_layout.addWidget(reset_button)
+        additional_layout.addWidget(nobody_button)
         additional_layout.setSpacing(0)
         
         additional_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -246,6 +260,23 @@ class QuestionWindow(QWidget):
         point_dict[category][score].append((team, -score))
         recompute_scores()
         point_dict.sync()
+        
+        
+    def nobody_points(self,category, score):
+        if category not in point_dict:
+            point_dict[category] = {}
+        if score not in point_dict[category]:
+            point_dict[category][score] = []
+        if self.timer is not None:
+            self.timer.stop()
+        point_dict[category][score].append(("-", 0))
+        disable_button(category, score)
+        recompute_scores()
+        point_dict.sync()
+        self.close()
+        assert mainWindow is not None
+        assert mainWindow.open_question is not None
+        mainWindow.open_question = None
         
         
     def award_points(self, team, category, score, full_points=True):
