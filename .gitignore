@@ -1,5 +1,6 @@
 *.db
 other
 .venv
+.env
 
 questions

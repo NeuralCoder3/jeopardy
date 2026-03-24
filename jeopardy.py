@@ -4,55 +4,226 @@ from PySide6.QtCore import *
 from PySide6.QtGui import *
 import sys
 import os
+import json
+import threading
+import time
+import websockets.sync.client as ws_client
+import queue
+import argparse
+from dotenv import load_dotenv
 
-serialEnable = False
+load_dotenv()
 
-if serialEnable:
-    import serial
-    from serial.tools import list_ports
+BUZZER_URL = os.getenv("BUZZER_URL", "wss://buzzer.neuralcoder.de/api")
+INSTANCE = os.getenv("BUZZER_INSTANCE", "test")
+ADMIN_SESSION = os.getenv("BUZZER_ADMIN_SESSION", "cdcdc6fc-99d1X")
+QUESTION_DIR = os.getenv("QUESTION_DIR", "questions")
 
-    ports = list_ports.comports()
-    if len(ports) == 0 or os.environ.get("NO_SERIAL_PORTS", "0") == "1":
-        # no ports or diabled by ENV
-        print("No serial ports found!")
-        # exit(1)
-        ser = None
-    else:
-        port = None
-        if len(ports) > 1:
-            for i, port in enumerate(ports):
-                print(f"{i}: {port.device} - {port.description}")
-            choice = int(input("Select port (0-{}): ".format(len(ports)-1)))
-            if choice < 0 or choice >= len(ports):
-                port = ports[choice]
+
+BUZZER_URL = "wss://buzzer.neuralcoder.de/api"
+INSTANCE = "test"
+ADMIN_SESSION = "cdcdc6fc-99d1X"
+buzzer_socket = None
+buzzer_message_queue = queue.Queue()
+buzzer_team_map = {}
+team_uuid_map = {}
+session = None
+teams_initialized = False
+request_id_counter = 0
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Jeopardy game with buzzer support')
+    parser.add_argument('--buzzer-url', dest='buzzer_url', help='Buzzer server URL')
+    parser.add_argument('--instance', dest='instance', help='Buzzer instance ID')
+    parser.add_argument('--admin-session', dest='admin_session', help='Admin session token')
+    parser.add_argument('--question-dir', dest='question_dir', help='Questions directory')
+    return parser.parse_args()
+
+args = parse_args()
+BUZZER_URL = args.buzzer_url or BUZZER_URL
+INSTANCE = args.instance or INSTANCE
+ADMIN_SESSION = args.admin_session or ADMIN_SESSION
+QUESTION_DIR = args.question_dir or QUESTION_DIR
+
+
+def send_buzzer_request(payload):
+    global request_id_counter
+    if buzzer_socket is None:
+        print(f"Cannot send request: No socket connected")
+        return None
+    msg_id = request_id_counter
+    request_id_counter += 1
+    request = {
+        "id": msg_id,
+        "payload": payload
+    }
+    print(f"Sending request: {json.dumps(request)}")
+    buzzer_socket.send(json.dumps(request))
+    return msg_id
+
+
+def set_buzzer_points(team_uuid, points):
+    global session
+    if session is None:
+        print(f"Cannot set points for {team_uuid}: No session")
+        return
+    print(f"Setting team {team_uuid} points to {points}")
+    send_buzzer_request({
+        "kind": "SetPoints",
+        "session": session,
+        "teamId": team_uuid,
+        "points": points
+    })
+
+
+def sync_all_team_points():
+    print(f"Syncing all teams. team_uuid_map: {team_uuid_map}, teams: {dict(teams)}")
+    for team, data in teams.items():
+        team_index = int(team.replace("team", ""))
+        team_uuid = team_uuid_map.get(team_index)
+        if team_uuid:
+            team_score = data.get("score", 0)
+            set_buzzer_points(team_uuid, team_score)
         else:
-            port = ports[0]
-        if port is None:
-            ser = None
-        else:
-            ser = serial.Serial(
-                port=port.device,
-                baudrate=9600,
-                parity=serial.PARITY_ODD,
-                stopbits=serial.STOPBITS_TWO,
-                bytesize=serial.SEVENBITS
-            )
-else:
-    ser = None
+            print(f"Warning: No UUID for team {team}")
+
+
+def set_buzzers_enabled(enabled):
+    global session
+    if session is None:
+        print(f"Cannot set buzzers to {enabled}: No session")
+        return
+    print(f"Setting buzzers to {enabled}")
+    send_buzzer_request({
+        "kind": "SetBuzzersEnabled",
+        "session": session,
+        "enabled": enabled
+    })
+
+
+def connect_to_buzzer():
+    global buzzer_socket, session
+    try:
+        print("Connecting to buzzer server...")
+        buzzer_socket = ws_client.connect(BUZZER_URL)
+        
+        session = ADMIN_SESSION
+        print(f"Using admin session: {session}")
+        
+        send_buzzer_request({
+            "kind": "StreamServerState",
+            "instance": INSTANCE
+        })
+        send_buzzer_request({
+            "kind": "StreamSettings",
+            "instance": INSTANCE
+        })
+        send_buzzer_request({
+            "kind": "StreamBuzzFeed",
+            "instance": INSTANCE
+        })
+        
+        while True:
+            message = buzzer_socket.recv()
+            buzzer_message_queue.put(message)
+    except Exception as e:
+        print(f"Buzzer connection error: {e}")
+        buzzer_socket = None
+
+
+def reset_buzzer():
+    global session
+    if session is None:
+        print("Cannot reset buzzer: No session")
+        return
+    print("Resetting buzzer")
+    send_buzzer_request({
+        "kind": "SetBuzzersEnabled",
+        "session": session,
+        "enabled": False
+    })
+    send_buzzer_request({
+        "kind": "SetBuzzersEnabled",
+        "session": session,
+        "enabled": True
+    })
+
+
+def start_buzzer_connection():
+    thread = threading.Thread(target=connect_to_buzzer, daemon=True)
+    thread.start()
+    time.sleep(1)
+    process_buzzer_messages()
+
+
+def process_buzzer_messages():
+    global teams_initialized
+    while not buzzer_message_queue.empty():
+        try:
+            message = buzzer_message_queue.get_nowait()
+            data = json.loads(message)
+            
+            print(f"Received from server: {json.dumps(data)}")
+            
+            if "streamVal" in data:
+                stream_val = data["streamVal"]
+                
+                if "teams" in stream_val:
+                    if not teams_initialized:
+                        initialize_teams_from_server(stream_val["teams"])
+                    else:
+                        for team in stream_val["teams"]:
+                            team_uuid = team["uuid"]
+                            team_name = team["name"]
+                            if team_uuid not in buzzer_team_map:
+                                team_index = len(buzzer_team_map)
+                                buzzer_team_map[team_uuid] = team_index
+                                team_uuid_map[team_index] = team_uuid
+        except Exception as e:
+            print(f"Error processing buzzer message: {e}")
+
+
+def initialize_teams_from_server(server_teams):
+    global teams, buzzer_team_map, team_uuid_map, teams_initialized
+    
+    print(f"Initializing teams from server. server_teams: {server_teams}")
+    print(f"Before: buzzer_team_map={buzzer_team_map}, team_uuid_map={team_uuid_map}")
+    
+    teams.clear()
+    buzzer_team_map.clear()
+    team_uuid_map.clear()
+    
+    for team in server_teams:
+        if team.get("isLobby", False):
+            continue
+            
+        team_uuid = team["uuid"]
+        team_name = team["name"]
+        
+        if team_uuid in buzzer_team_map:
+            continue
+            
+        team_index = len(buzzer_team_map)
+        buzzer_team_map[team_uuid] = team_index
+        team_uuid_map[team_index] = team_uuid
+        
+        teamkey = f"team{team_index}"
+        teams[teamkey] = {
+            "name": team_name,
+            "score": team.get("score", 0)
+        }
+        print(f"  Mapped {team_name} (uuid={team_uuid}) to {teamkey}")
+    
+    teams.sync()
+    teams_initialized = True
+    print(f"Initialized {len(teams)} teams from server")
+    print(f"After: buzzer_team_map={buzzer_team_map}, team_uuid_map={team_uuid_map}")
         
 
-question_dir = os.path.join(".", "questions")
+question_dir = QUESTION_DIR
+
 
 teams = shelve.open("teams.db", writeback=True)
-for i in range(4):
-    teamkey = f"team{i}"
-    if teamkey in teams:
-        # team already exists
-        continue
-    teams[teamkey] = {
-        "name": f"Team {i}",
-    }
-    
 point_dict = shelve.open("points.db", writeback=True)
 additional_points = shelve.open("additional_points.db", writeback=True)
 
@@ -75,12 +246,12 @@ def recompute_scores():
     for team in teams:
         scores[team] = 0
     for category, data in point_dict.items():
-        for score, teamdata in data.items():
-            for team, score in teamdata:
+        for point_value, teamdata in data.items():
+            for team, awarded_score in teamdata:
                 if team not in scores:
-                    print(f"Invalid team {team} in for category {category} and score {score}")
+                    print(f"Invalid team {team} in for category {category} and score {point_value}")
                     continue
-                scores[team] += score
+                scores[team] += awarded_score
                 
     for team, deltas in additional_points.items():
         for delta in deltas:
@@ -95,18 +266,19 @@ def recompute_scores():
             continue
         score_buttons[team].setText(str(score))
         teams[team].update({"score": score})
-        
+         
 
 class QuestionWindow(QWidget):
-    def __init__(self, category, score):
+    def __init__(self, category, score, override=False):
         super().__init__()
-        print("Creating question window for", category, score)
+        print("Creating question window for", category, score, f"(override: {override})")
         layout = QVBoxLayout()
         
         self.category = category
         self.score = score
         self.input = -1
         self.team_buttons = []
+        self.override = override
         
         filename = question_file[category][score]
         if filename.endswith(".txt"):
@@ -202,39 +374,60 @@ class QuestionWindow(QWidget):
         self.destroyed.connect(self.on_close)
         self.setWindowTitle(f"Question for {category} {score}")
         
-        # poll serial port for team that buzzed in
-        if ser is not None:
-            print("Starting serial port polling")
+        if buzzer_socket is not None:
+            print("Starting buzzer message polling")
+            reset_buzzer()
+            set_buzzers_enabled(True)
             self.timer = QTimer(self)
-            self.timer.timeout.connect(self.poll_serial)
+            self.timer.timeout.connect(self.poll_buzzer)
             self.timer.start(100)
         else:
-            print("No serial port found, skipping polling")
+            print("No buzzer connection found, skipping polling")
             self.timer = None
         
     def reset_team_buttons(self):
         for button, _ in self.team_buttons:
             button.setStyleSheet("background-color: darkblue; color: yellow; font-size: 20px; font-weight: bold;")
         self.input = -1
+        reset_buzzer()
             
-    def poll_serial(self):
-        assert ser is not None
-        if self.input != -1:
-            # read all data from serial port
-            while ser.in_waiting > 0:
-                ser.readline()
-            return
-        if ser.in_waiting > 0:
-            data = ser.readline().decode("utf-8").strip()
-            print("Received data:", data)
-            index = int(data)
-            if index < len(self.team_buttons):
-                print("Team", index, "buzzed in")
-                self.input = index
-                team, _ = self.team_buttons[index]
-                team.setStyleSheet("background-color: green; color: white; font-size: 20px; font-weight: bold;")
-            else:
-                print("Invalid team index", index)
+    def poll_buzzer(self):
+        global teams_initialized
+        while not buzzer_message_queue.empty():
+            try:
+                message = buzzer_message_queue.get_nowait()
+                data = json.loads(message)
+                
+                if "streamVal" in data:
+                    stream_val = data["streamVal"]
+                    
+                    if "teams" in stream_val:
+                        if not teams_initialized:
+                            initialize_teams_from_server(stream_val["teams"])
+                        else:
+                            for team in stream_val["teams"]:
+                                team_uuid = team["uuid"]
+                                team_name = team["name"]
+                                if team_uuid not in buzzer_team_map:
+                                    team_index = len(buzzer_team_map)
+                                    buzzer_team_map[team_uuid] = team_index
+                                    team_uuid_map[team_index] = team_uuid
+                    
+                    if "lastWinner" in stream_val and stream_val["lastWinner"]:
+                        winner_uuid = stream_val["lastWinner"]
+                        if winner_uuid in buzzer_team_map and self.input == -1:
+                            team_index = buzzer_team_map[winner_uuid]
+                            if team_index < len(self.team_buttons):
+                                print("Team", team_index, "buzzed in")
+                                self.input = team_index
+                                team, _ = self.team_buttons[team_index]
+                                team.setStyleSheet("background-color: green; color: white; font-size: 20px; font-weight: bold;")
+                
+                if self.input != -1:
+                    while not buzzer_message_queue.empty():
+                        buzzer_message_queue.get()
+            except Exception as e:
+                print(f"Error processing buzzer message: {e}")
         
         
     def on_close(self):
@@ -242,6 +435,7 @@ class QuestionWindow(QWidget):
         set_normal_button(self.category, self.score)
         if self.timer is not None:
             self.timer.stop()
+        set_buzzers_enabled(False)
         self.close()
         assert mainWindow is not None
         mainWindow.open_question = None
@@ -252,15 +446,21 @@ class QuestionWindow(QWidget):
             print(f"Invalid team {team} in for category {category} and score {score}")
             return
         self.reset_team_buttons()
-        # score = self.score
         if category not in point_dict:
             point_dict[category] = {}
         if score not in point_dict[category]:
             point_dict[category][score] = []
+        
+        if self.override:
+            print(f"Overriding existing points for {category} {score}")
+            point_dict[category][score] = []
+        
         point_dict[category][score].append((team, -score))
         recompute_scores()
-        point_dict.sync()
+        sync_all_team_points()
         
+        point_dict.sync()
+         
         
     def nobody_points(self,category, score):
         if category not in point_dict:
@@ -269,10 +469,17 @@ class QuestionWindow(QWidget):
             point_dict[category][score] = []
         if self.timer is not None:
             self.timer.stop()
+        
+        if self.override:
+            print(f"Overriding existing points for {category} {score}")
+            point_dict[category][score] = []
+        
         point_dict[category][score].append(("-", 0))
         disable_button(category, score)
         recompute_scores()
+        sync_all_team_points()
         point_dict.sync()
+        set_buzzers_enabled(False)
         self.close()
         assert mainWindow is not None
         assert mainWindow.open_question is not None
@@ -287,14 +494,22 @@ class QuestionWindow(QWidget):
             point_dict[category] = {}
         if score not in point_dict[category]:
             point_dict[category][score] = []
-        # else:
-        #     print(f"Score {score} already awarded for category {category}")
+        
+        if self.override:
+            print(f"Overriding existing points for {category} {score}")
+            point_dict[category][score] = []
+        
         if self.timer is not None:
             self.timer.stop()
-        point_dict[category][score].append((team, score if full_points else score // 2))
+        
+        awarded_score = score if full_points else score // 2
+        point_dict[category][score].append((team, awarded_score))
         disable_button(category, score)
         recompute_scores()
+        sync_all_team_points()
+        
         point_dict.sync()
+        set_buzzers_enabled(False)
         self.close()
         assert mainWindow is not None
         assert mainWindow.open_question is not None
@@ -309,10 +524,18 @@ def select_point(category, score):
     if mainWindow.open_question:
         print("A question is already open")
         return
-    print(f"Selected point {category} {score}")
+    
+    if category not in point_buttons or score not in point_buttons[category]:
+        print(f"Button for {category} {score} not found")
+        return
+    
+    button = point_buttons[category][score]
+    is_disabled = button.property("disabled_state")
+    
+    print(f"Selected point {category} {score} (disabled: {is_disabled})")
     set_active_button(category, score)
     
-    question_window = QuestionWindow(category, score)
+    question_window = QuestionWindow(category, score, override=is_disabled)
     
     mainWindow.open_question = (question_window, category, score)
     mainWindow.open_question[0].show()
@@ -322,11 +545,8 @@ def disable_button(category, score):
         print(f"Button for {category} {score} not found")
         return
     button = point_buttons[category][score]
-    button.setDisabled(True)
     
     team_scores = {}
-    # for team, _ in teams.items():
-    #     team_scores[team] = 0
     winner = None
     losers = []
     for team, score in point_dict[category][score]:
@@ -339,7 +559,8 @@ def disable_button(category, score):
             losers.append(team)
     button.setStyleSheet("background-color: gray; color: white; font-size: 15px; font-weight: bold;")
     button.setIconSize(QSize(0, 0))
-    # losers = [teams[team]["name"] for team in sorted(team_scores.keys()) if team_scores[team] < 0]
+    button.setProperty("disabled_state", True)
+    
     loser_txt = "\n"
     for i, team in enumerate(sorted(losers)):
         if i > 0:
@@ -426,6 +647,7 @@ def undo_point(category, score):
     del point_dict[category][score]
     set_normal_button(category, score)
     recompute_scores()
+    sync_all_team_points()
     point_dict.sync()
     
 
@@ -532,8 +754,32 @@ class MainWindow(QMainWindow):
         additional_points[team].append(delta)
         additional_points.sync()
         recompute_scores()
+        sync_all_team_points()
 
+
+
+start_buzzer_connection()
+
+print("Waiting for teams from buzzer server...")
+timeout = 30
+while not teams_initialized and timeout > 0:
+    process_buzzer_messages()
+    time.sleep(0.1)
+    timeout -= 1
+
+if not teams_initialized:
+    print("Warning: Teams not initialized from server within timeout")
+else:
+    print(f"Teams initialized: {teams}")
+    sync_all_team_points()
+
+print(f"Session: {session}")
 
 app = QApplication(sys.argv)
 mainWindow = MainWindow()
+
+message_timer = QTimer()
+message_timer.timeout.connect(process_buzzer_messages)
+message_timer.start(50)
+
 app.exec()

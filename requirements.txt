@@ -1,2 +1,4 @@
 pyserial
 pyside6
+websockets
+python-dotenv

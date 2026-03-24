@@ -5,6 +5,7 @@ pkgs.mkShell {
   buildInputs = [
     (pkgs.python312.withPackages (ps: with ps; [
       pyside6      # Qt for Python bindings
+      websockets
     ]))
     # Include pip and venv for managing extra packages
     pkgs.python312Packages.pip
